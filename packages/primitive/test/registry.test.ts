@@ -50,6 +50,38 @@ describe('repro issue', () => {
     expect(shiki.getLanguage('host')).not.toBe(before)
     expect(dispose).toHaveBeenCalledOnce()
   })
+
+  it('reloads a lazily embedding grammar once per batch', () => {
+    const guests: LanguageRegistration[] = ['a', 'b', 'c'].map(name => ({
+      name: `guest-${name}`,
+      scopeName: `source.guest-${name}`,
+      patterns: [{ match: name, name: `keyword.${name}` }],
+      repository: {},
+    }))
+    const host: LanguageRegistration = {
+      name: 'host',
+      scopeName: 'source.host',
+      embeddedLangsLazy: guests.map(g => g.name),
+      patterns: guests.map(g => ({ include: g.scopeName })),
+      repository: {},
+    }
+    const langs = [host, ...guests]
+    const resolver = new Resolver(createJavaScriptRegexEngine(), langs)
+    const registry = new Registry(resolver, [], [])
+    const loadGrammar = vi.spyOn(registry, 'loadGrammarWithConfiguration')
+
+    try {
+      registry.loadLanguages(langs)
+
+      // host, three guests, and one reload of host
+      expect(loadGrammar.mock.calls.filter(([scope]) => scope === host.scopeName)).toHaveLength(2)
+      expect(registry.getGrammar('host')!.tokenizeLine('abc', null).tokens.map(t => t.scopes.at(-1)))
+        .toEqual(['keyword.a', 'keyword.b', 'keyword.c'])
+    }
+    finally {
+      registry.dispose()
+    }
+  })
 })
 
 describe('injection registration', () => {

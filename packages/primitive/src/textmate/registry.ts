@@ -20,6 +20,7 @@ export class Registry extends TextMateRegistry {
   private _textmateThemeCache = new WeakMap<IRawTheme, TextMateTheme>()
   private _loadedThemesCache: string[] | null = null
   private _loadedLanguagesCache: string[] | null = null
+  private _pendingReloads: Set<string> | null = null
 
   constructor(
     private _resolver: Resolver,
@@ -105,17 +106,24 @@ export class Registry extends TextMateRegistry {
     this._loadedLanguagesCache = null
 
     // If there is a language that embeds this language lazily, we need to reload it
-    if (embeddedLazilyBy.size) {
-      for (const e of embeddedLazilyBy) {
-        this._syncRegistry?._grammars?.get(e.scopeName)?.dispose()
-        this._resolvedGrammars.delete(e.name)
-        // Reset cache
-        this._loadedLanguagesCache = null
-        this._syncRegistry?._injectionGrammars?.delete(e.scopeName)
-        this._syncRegistry?._grammars?.delete(e.scopeName)
-        this.loadLanguage(this._langMap.get(e.name)!)
-      }
+    for (const e of embeddedLazilyBy) {
+      // While loading a batch, reload each language once at the end instead
+      if (this._pendingReloads)
+        this._pendingReloads.add(e.name)
+      else
+        this.reloadLanguage(e.name)
     }
+  }
+
+  private reloadLanguage(name: string): void {
+    const lang = this._langMap.get(name)!
+    this._syncRegistry?._grammars?.get(lang.scopeName)?.dispose()
+    this._resolvedGrammars.delete(lang.name)
+    // Reset cache
+    this._loadedLanguagesCache = null
+    this._syncRegistry?._injectionGrammars?.delete(lang.scopeName)
+    this._syncRegistry?._grammars?.delete(lang.scopeName)
+    this.loadLanguage(lang)
   }
 
   public override dispose(): void {
@@ -149,8 +157,22 @@ export class Registry extends TextMateRegistry {
     for (const [_, lang] of langsGraphArray)
       this._resolver.addLanguage(lang)
 
-    for (const [_, lang] of langsGraphArray)
-      this.loadLanguage(lang)
+    // Loading a language reloads the languages that embed it lazily. Do that once per
+    // language after the whole batch, not once per loaded language.
+    const isBatchRoot = !this._pendingReloads
+    this._pendingReloads ??= new Set()
+    try {
+      for (const [_, lang] of langsGraphArray)
+        this.loadLanguage(lang)
+    }
+    finally {
+      if (isBatchRoot) {
+        const pending = this._pendingReloads
+        this._pendingReloads = null
+        for (const name of pending)
+          this.reloadLanguage(name)
+      }
+    }
   }
 
   public getLoadedLanguages(): string[] {
